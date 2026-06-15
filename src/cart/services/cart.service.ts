@@ -1,35 +1,41 @@
 import { Injectable } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { CartEntity, CartItemEntity, CartStatus } from '../entities';
 import { Cart, CartStatuses } from '../models';
 import { PutCartPayload } from 'src/order/type';
 
 @Injectable()
 export class CartService {
-  private userCarts: Record<string, Cart> = {};
+  constructor(
+    @InjectRepository(CartEntity)
+    private readonly cartRepository: Repository<CartEntity>,
+    @InjectRepository(CartItemEntity)
+    private readonly cartItemRepository: Repository<CartItemEntity>,
+  ) {}
 
-  findByUserId(userId: string): Cart {
-    return this.userCarts[userId];
+  async findByUserId(userId: string): Promise<Cart> {
+    const cartEntity = await this.cartRepository.findOne({
+      where: { userId, status: CartStatus.OPEN },
+      relations: { items: true },
+    });
+
+    return cartEntity ? this.mapEntityToModel(cartEntity) : null;
   }
 
-  createByUserId(user_id: string): Cart {
-    const timestamp = Date.now();
-
-    const userCart = {
-      id: randomUUID(),
-      user_id,
-      created_at: timestamp,
-      updated_at: timestamp,
-      status: CartStatuses.OPEN,
+  async createByUserId(userId: string): Promise<Cart> {
+    const cartEntity = this.cartRepository.create({
+      userId,
+      status: CartStatus.OPEN,
       items: [],
-    };
+    });
 
-    this.userCarts[user_id] = userCart;
-
-    return userCart;
+    const savedCart = await this.cartRepository.save(cartEntity);
+    return this.mapEntityToModel(savedCart);
   }
 
-  findOrCreateByUserId(userId: string): Cart {
-    const userCart = this.findByUserId(userId);
+  async findOrCreateByUserId(userId: string): Promise<Cart> {
+    const userCart = await this.findByUserId(userId);
 
     if (userCart) {
       return userCart;
@@ -38,25 +44,68 @@ export class CartService {
     return this.createByUserId(userId);
   }
 
-  updateByUserId(userId: string, payload: PutCartPayload): Cart {
-    const userCart = this.findOrCreateByUserId(userId);
+  async updateByUserId(userId: string, payload: PutCartPayload): Promise<Cart> {
+    let cartEntity = await this.cartRepository.findOne({
+      where: { userId, status: CartStatus.OPEN },
+      relations: { items: true },
+    });
 
-    const index = userCart.items.findIndex(
-      ({ product }) => product.id === payload.product.id,
-    );
-
-    if (index === -1) {
-      userCart.items.push(payload);
-    } else if (payload.count === 0) {
-      userCart.items.splice(index, 1);
-    } else {
-      userCart.items[index] = payload;
+    if (!cartEntity) {
+      cartEntity = await this.cartRepository.save(
+        this.cartRepository.create({
+          userId,
+          status: CartStatus.OPEN,
+          items: [],
+        }),
+      );
     }
 
-    return userCart;
+    const existingItem = cartEntity.items.find(
+      (item) => item.productId === payload.product.id,
+    );
+
+    if (existingItem) {
+      if (payload.count === 0) {
+        await this.cartItemRepository.remove(existingItem);
+        cartEntity.items = cartEntity.items.filter((item) => item.id !== existingItem.id);
+      } else {
+        existingItem.count = payload.count;
+        await this.cartItemRepository.save(existingItem);
+      }
+    } else if (payload.count > 0) {
+      const newItem = this.cartItemRepository.create({
+        cartId: cartEntity.id,
+        productId: payload.product.id,
+        count: payload.count,
+      });
+      const savedItem = await this.cartItemRepository.save(newItem);
+      cartEntity.items.push(savedItem);
+    }
+
+    const updatedCart = await this.cartRepository.save(cartEntity);
+    return this.mapEntityToModel(updatedCart);
   }
 
-  removeByUserId(userId): void {
-    this.userCarts[userId] = null;
+  async removeByUserId(userId: string): Promise<void> {
+    await this.cartRepository.delete({ userId, status: CartStatus.OPEN });
+  }
+
+  private mapEntityToModel(cartEntity: CartEntity): Cart {
+    return {
+      id: cartEntity.id,
+      user_id: cartEntity.userId,
+      created_at: cartEntity.createdAt.getTime(),
+      updated_at: cartEntity.updatedAt.getTime(),
+      status: cartEntity.status as unknown as CartStatuses,
+      items: cartEntity.items.map((item) => ({
+        product: {
+          id: item.productId,
+          title: '',
+          description: '',
+          price: 0,
+        },
+        count: item.count,
+      })),
+    };
   }
 }
