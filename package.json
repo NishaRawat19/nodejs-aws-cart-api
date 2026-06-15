@@ -29,6 +29,7 @@
     "cdk:destroy": "cd infra && cdk destroy"
   },
   "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.1068.0",
     "@codegenie/serverless-express": "^4.17.1",
     "@nestjs/common": "^10.0.3",
     "@nestjs/config": "^3.0.0",
